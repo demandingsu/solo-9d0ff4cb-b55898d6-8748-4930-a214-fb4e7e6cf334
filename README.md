@@ -1,31 +1,35 @@
 # 连锁便利店电价套餐比较 API
 
 能源采购员按门店未来 12 个月的峰谷用电预测，比较公开电价套餐的年度成本，辅助续签决策。
+另提供**报价变更采集 API**：按报价源采集套餐快照，核对改价、上架、下架与详情地址变化。
 
 - **Web 框架**：Python 3.11 + FastAPI（`app/main.py`）
 - **抓取与计费核心**：仅依赖 Python 标准库（`urllib` + `html.parser` + `decimal`），离线可测
-- **本地报价站**：随仓库提供的纯静态站点（`quote-site/`），nginx 容器托管，无需外网
-- **部署**：Docker Compose 一键启动 API + 报价站
+- **快照存储**：标准库 `sqlite3`，同一报价源并发采集时对比与提交严格一致
+- **本地报价站**：随仓库提供三个纯静态站点，nginx 容器托管，无需外网
+  - `quote-site/`：原有比较演示站
+  - `quote-site-v1/`：报价版本 1（基线）
+  - `quote-site-v2/`：报价版本 2（含改价、上架、下架、详情改址）
+- **部署**：Docker Compose 一键启动 API + 三个报价站
 
 ## 目录结构
 
 ```
 .
 ├── app/
-│   ├── main.py        # FastAPI 路由与比较编排
+│   ├── main.py        # FastAPI 路由：比较 API + 报价变更采集 API
 │   ├── schemas.py     # 请求/响应 Pydantic 模型
-│   ├── scraper.py     # 分页列表 + 套餐详情抓取解析
+│   ├── scraper.py     # 分页列表 + 套餐详情抓取解析（含严格完整快照模式）
+│   ├── snapshots.py   # SQLite 快照仓库：原子对比与提交、字段差异
 │   ├── fetcher.py     # http/https/file 统一抓取层与错误归一化
 │   ├── html_dom.py    # 标准库实现的轻量 HTML DOM
 │   └── billing.py     # 峰谷逐档计费、资格校验、年度汇总
-├── quote-site/        # 本地报价站（静态 HTML，虚构演示数据）
-│   ├── index.html         # 列表第 1 页（P001-P004，含 next 分页链接）
-│   ├── index-2.html       # 列表第 2 页（P005-P007）
-│   ├── plans/p001..p006.html
-│   ├── 404.html           # p007.html 故意缺失，演示详情抓取失败
-│   └── nginx.conf
-├── tests/             # 标准库 unittest 离线测试（9 个用例）
-├── demo/request.json  # 示例请求（12 个月峰谷用电）
+├── quote-site-v1/     # 报价版本 1：P001-P005（基线）
+├── quote-site-v2/     # 报价版本 2：P001 改价、P002 下架、P003 详情改址、
+│                      #              P005 供应商变更、P006 上架
+├── quote-site/        # 原有比较演示站（P001-P007）
+├── tests/             # 标准库 unittest 离线测试（21 个用例）
+├── demo/              # 比较请求与报价变更请求示例
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -36,11 +40,29 @@
 docker compose up --build
 ```
 
-- 报价站：http://localhost:8080/index.html
+- 报价版本 1：http://localhost:8081/index.html
+- 报价版本 2：http://localhost:8082/index.html
+- 原有报价站：http://localhost:8080/index.html
 - API 文档（Swagger UI）：http://localhost:8000/docs
 - 健康检查：http://localhost:8000/health
 
-发起比较请求（容器内通过 `http://quote-site/index.html` 访问报价站）：
+### 报价变更采集演示（容器内地址）
+
+```bash
+# 1) 首次完整采集版本 1 -> 建立基线（changes 为空）
+curl -X POST http://localhost:8000/api/v1/quote-changes \
+  -H "Content-Type: application/json" --data @demo/quote-change-v1.json
+
+# 2) 采集版本 2 -> 返回与上次完整快照的字段差异
+curl -X POST http://localhost:8000/api/v1/quote-changes \
+  -H "Content-Type: application/json" --data @demo/quote-change-v2.json
+
+# 3) 重复采集版本 2 -> status=unchanged，无变更记录
+curl -X POST http://localhost:8000/api/v1/quote-changes \
+  -H "Content-Type: application/json" --data @demo/quote-change-v2.json
+```
+
+初始化比较请求（原有功能）：
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/compare-plans \
@@ -60,11 +82,79 @@ python3 -I -m unittest discover -s tests -t . -v
 
 ```bash
 python3 -m http.server 8080 --directory quote-site
+python3 -m http.server 8081 --directory quote-site-v1
+python3 -m http.server 8082 --directory quote-site-v2
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 # 请求中将 list_url 改为 http://127.0.0.1:8080/index.html
 # 也支持 file:// 绝对路径，完全离线：
 #   "list_url": "file:///workspace/quote-site/index.html"
 ```
+
+## 报价变更采集 API
+
+`POST /api/v1/quote-changes`
+
+| 字段 | 说明 |
+| --- | --- |
+| `source_key` | 报价源标识；同一标识的快照独立对比。如 `demo-quote-site` |
+| `list_url` | 该报价源套餐列表首页 URL，支持 `http(s)://` 与 `file://` |
+| `timeout_seconds` | 可选，单次抓取超时 1-30 秒，默认 8 |
+
+处理规则：
+
+1. **快照内容**：每个套餐保存编号、名称、供应商、地区集合、月基本费，以及峰段/谷段
+   逐档费率（档位、起止电量、费率）和详情地址。
+2. **首次完整采集**：只建立基线，`status=baseline_created`，`changes` 为空。
+3. **差异比较**：与**该来源上次完整快照**按套餐编号比较，返回
+   - `added`：本次新上架（带 `new_detail_url`）；
+   - `removed`：本次已下架（带 `old_detail_url`）；
+   - `changed`：字段变化，`field` 为 `supplier` / `regions` / `base_fee_cny` /
+     `peak_tiers` / `valley_tiers` / `detail_url`，同时给出新旧详情地址。
+4. **完整性与失败保护**：以下任一情况 `status=incomplete`，响应 `issues` 列出问题地址
+   （`stage` 为 `list` / `detail` / `pagination`），**不提交新快照，原快照保留**，
+   因此不会把解析失败误报为下架：
+   - 列表项无法解析（缺套餐编号、详情链接、供应商、地区或月基本费）；
+   - 分页未到终页（页面公布的总页数未抓满、缺少下一页链接、分页序号异常或重复）；
+   - 详情抓取失败或详情编号与列表不一致；
+   - 详情关键字段缺失（供应商、地区、月基本费、峰段或谷段费率表）；
+   - 列表与详情的供应商/地区/月基本费互相冲突。
+5. **幂等**：内容与上次完整快照完全一致时 `status=unchanged`，不写入新快照、不产生变更记录。
+   详情地址按“相对列表首页的站点内路径”比较，避免部署主机或 `file://` 路径前缀变化
+   造成无关的地址变更。
+6. **并发一致**：同一 `source_key` 的并发采集在 SQLite `BEGIN IMMEDIATE` 写事务内完成
+   “读取上次快照 → 比较 → 提交”，同一来源的对比与提交不会交错；同一内容并发采集
+   恰好一次建立基线，其余均为 `unchanged`。
+
+响应结构（摘要）：
+
+```json
+{
+  "source_key": "demo-quote-site",
+  "status": "changed",
+  "snapshot_id": 2,
+  "previous_snapshot_id": 1,
+  "plan_count": 5,
+  "plans": [ { "plan_id": "P001", "supplier": "安能电力", "base_fee_cny": 65.0,
+               "regions": ["上海"], "peak_tiers": [...], "valley_tiers": [...],
+               "detail_url": "http://quote-site-v2/plans/p001.html" } ],
+  "changes": [
+    { "plan_id": "P001", "change_type": "changed", "field": "base_fee_cny",
+      "old_value": 60.0, "new_value": 65.0,
+      "old_detail_url": ".../p001.html", "new_detail_url": ".../p001.html" },
+    { "plan_id": "P006", "change_type": "added", "field": null,
+      "old_value": null, "new_value": {...}, "new_detail_url": ".../p006.html" },
+    { "plan_id": "P002", "change_type": "removed", "field": null,
+      "old_value": {...}, "new_value": null, "old_detail_url": ".../p002.html" }
+  ],
+  "issues": []
+}
+```
+
+不完整采集时：`status=incomplete`，`changes` 为空，`issues` 非空，`snapshot_id` 仍为
+上次完整快照编号（若存在），`plans` 返回保留的原快照内容。
+
+快照数据库路径由 `SNAPSHOT_DB_PATH` 指定（默认 `./data/quote_snapshots.sqlite3`），
+Compose 中挂载命名卷 `/data` 持久化。
 
 ## 请求格式
 
@@ -109,6 +199,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | P007 安能 C | 上海/华东 | 详情页 404，进入 `failures`，最低价标为待核实 |
 
 示例请求下的复核年度成本（元）：**P003 6899.40 < P001 7247.40 < P002 7842.00**。
+
+### 两个报价版本的变更场景（`quote-site-v1` → `quote-site-v2`）
+
+| 套餐 | 版本 2 的变化 | 采集结果 |
+| --- | --- | --- |
+| P001 安能 峰谷A | 月基本费 60 → 65，谷段 300+ 费率 0.55 → 0.52 | `changed`：`base_fee_cny`、`valley_tiers` |
+| P002 安能 峰谷B | 从列表与详情入口下架（详情页文件保留） | `removed` |
+| P003 沪电 阶梯标准版 | 详情地址 `p003.html` → `p003-v2.html` | `changed`：`detail_url` |
+| P004 通商 华北套餐 | 无变化 | 不产生记录 |
+| P005 安能 A+ | 供应商 安能电力 → 安能新能源 | `changed`：`supplier` |
+| P006 沪电 小门店新套餐 | 新上架 | `added` |
 
 ## 响应结构（摘要）
 

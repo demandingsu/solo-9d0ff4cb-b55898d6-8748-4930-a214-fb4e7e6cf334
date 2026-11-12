@@ -92,3 +92,83 @@ class CompareResponse(BaseModel):
     ranked_plans: list[RankedPlanOut]
     excluded_plans: list[ExcludedPlanOut]
     failures: list[CrawlFailureOut]
+
+
+# ---------------------------------------------------------------------------
+# 报价变更采集 API
+# ---------------------------------------------------------------------------
+
+
+class QuoteChangeRequest(BaseModel):
+    source_key: str = Field(min_length=1, max_length=200,
+                            description="报价源标识，同一标识的快照独立对比，如 quote-site-v1")
+    list_url: str = Field(min_length=1, description="报价源套餐列表首页 URL，支持 http/https/file")
+    timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
+
+    @field_validator("source_key")
+    @classmethod
+    def _validate_source_key(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("source_key 不能为空")
+        if any(ch.isspace() for ch in value):
+            raise ValueError("source_key 不能包含空白字符")
+        return value
+
+    @field_validator("list_url")
+    @classmethod
+    def _validate_scheme(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith(("http://", "https://", "file://")):
+            raise ValueError("list_url 仅支持 http://、https:// 或 file:// 协议")
+        return value
+
+
+class RateTierOut(BaseModel):
+    index: int
+    lower_kwh: float
+    upper_kwh: float | None
+    rate_cny_per_kwh: float
+
+
+class SnapshotPlanOut(BaseModel):
+    plan_id: str
+    name: str
+    supplier: str
+    regions: list[str]
+    base_fee_cny: float
+    peak_tiers: list[RateTierOut]
+    valley_tiers: list[RateTierOut]
+    detail_url: str
+
+
+class QuoteChangeOut(BaseModel):
+    plan_id: str
+    plan_name: str | None
+    change_type: str  # added | removed | changed
+    field: str | None
+    old_value: object | None
+    new_value: object | None
+    old_detail_url: str | None
+    new_detail_url: str | None
+
+
+class SnapshotIssueOut(BaseModel):
+    url: str
+    stage: str  # list | detail | pagination
+    reason: str
+    status: int | None
+
+
+class QuoteChangeResponse(BaseModel):
+    source_key: str
+    list_url: str
+    status: str  # baseline_created | unchanged | changed | incomplete
+    snapshot_id: int | None
+    previous_snapshot_id: int | None
+    completed_at: str
+    plan_count: int
+    plans: list[SnapshotPlanOut]
+    changes: list[QuoteChangeOut]
+    issues: list[SnapshotIssueOut]
+    message: str

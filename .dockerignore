@@ -8,6 +8,11 @@ venv/
 .gitignore
 tests/
 demo/
+quote-site/
+quote-site-v1/
+quote-site-v2/
+data/
+*.sqlite3
 Dockerfile
 docker-compose.yml
 README.md

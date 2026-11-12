@@ -1,0 +1,8 @@
+body { font-family: sans-serif; margin: 2rem auto; max-width: 60rem; color: #222; }
+header h1 { font-size: 1.5rem; }
+.plan-card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+.plan-meta { color: #555; font-size: .9rem; }
+.tag { display: inline-block; background: #eef; border-radius: 4px; padding: 0 .4rem; margin-right: .3rem; }
+table.rate-table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+table.rate-table th, table.rate-table td { border: 1px solid #ccc; padding: .3rem .5rem; }
+nav.pagination { margin-top: 1rem; }

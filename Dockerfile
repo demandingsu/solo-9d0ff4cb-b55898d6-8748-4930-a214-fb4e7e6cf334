@@ -10,6 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
+# 快照 SQLite 目录（Compose 会将 /data 挂载为命名卷持久化）
+RUN mkdir -p /data
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

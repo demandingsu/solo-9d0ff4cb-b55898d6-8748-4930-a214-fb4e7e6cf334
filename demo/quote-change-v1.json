@@ -1,0 +1,5 @@
+{
+  "source_key": "demo-quote-site",
+  "list_url": "http://quote-site-v1/index.html",
+  "timeout_seconds": 8
+}
